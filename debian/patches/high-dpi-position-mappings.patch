@@ -1,0 +1,121 @@
+--- a/src/gui/kernel/qhighdpiscaling_p.h
++++ b/src/gui/kernel/qhighdpiscaling_p.h
+@@ -83,8 +83,10 @@
+     static qreal factor(const QPlatformScreen *platformScreen);
+     static QPoint origin(const QScreen *screen);
+     static QPoint origin(const QPlatformScreen *platformScreen);
+-    static QPoint mapPositionFromNative(const QPoint &pos, const QPlatformScreen *platformScreen);
+     static QPoint mapPositionToNative(const QPoint &pos, const QPlatformScreen *platformScreen);
++    static QPoint mapPositionFromNative(const QPoint &pos, const QPlatformScreen *platformScreen);
++    static QPoint mapPositionToGlobal(const QPoint &pos, const QPoint &windowGlobalPosition, const QWindow *window);
++    static QPoint mapPositionFromGlobal(const QPoint &pos, const QPoint &windowGlobalPosition, const QWindow *window);
+     static QDpi logicalDpi();
+ 
+ private:
+--- a/src/gui/kernel/qhighdpiscaling.cpp
++++ b/src/gui/kernel/qhighdpiscaling.cpp
+@@ -41,7 +41,9 @@
+ #include "qguiapplication.h"
+ #include "qscreen.h"
+ #include "qplatformintegration.h"
++#include "qplatformwindow.h"
+ #include "private/qscreen_p.h"
++#include <private/qguiapplication_p.h>
+ 
+ #include <QtCore/qdebug.h>
+ 
+@@ -372,6 +374,46 @@
+     return (pos - topLeft) / scaleFactor + topLeft;
+ }
+ 
++QPoint QHighDpiScaling::mapPositionToGlobal(const QPoint &pos, const QPoint &windowGlobalPosition, const QWindow *window)
++{
++    QPoint globalPosCandidate = pos + windowGlobalPosition;
++    if (QGuiApplicationPrivate::screen_list.size() <= 1)
++        return globalPosCandidate;
++
++    // The global position may be outside device independent screen geometry
++    // in cases where a window spans screens. Detect this case and map via
++    // native coordinates to the correct screen.
++    auto currentScreen = window->screen();
++    if (currentScreen && !currentScreen->geometry().contains(globalPosCandidate)) {
++        auto nativeGlobalPos = QHighDpi::toNativePixels(globalPosCandidate, currentScreen);
++        if (auto actualPlatformScreen = currentScreen->handle()->screenForPosition(nativeGlobalPos))
++            return QHighDpi::fromNativePixels(nativeGlobalPos, actualPlatformScreen->screen());
++    }
++
++    return globalPosCandidate;
++}
++
++QPoint QHighDpiScaling::mapPositionFromGlobal(const QPoint &pos, const QPoint &windowGlobalPosition, const QWindow *window)
++{
++    QPoint windowPosCandidate = pos - windowGlobalPosition;
++    if (QGuiApplicationPrivate::screen_list.size() <= 1 || window->handle() == nullptr)
++        return windowPosCandidate;
++
++    // Device independent global (screen) space may discontiguous when high-dpi scaling
++    // is active. This means that the normal subtracting of the window global position from the
++    // position-to-be-mapped may not work in cases where a window spans multiple screens.
++    // Map both positions to native global space (using the correct screens), subtract there,
++    // and then map the difference back using the scale factor for the window.
++    QScreen *posScreen = QGuiApplication::screenAt(pos);
++    if (posScreen && posScreen != window->screen()) {
++        QPoint nativePos = QHighDpi::toNativePixels(pos, posScreen);
++        QPoint windowNativePos = window->handle()->geometry().topLeft();
++        return QHighDpi::fromNativeLocalPosition(nativePos - windowNativePos, window);
++    }
++
++    return windowPosCandidate;
++}
++
+ qreal QHighDpiScaling::screenSubfactor(const QPlatformScreen *screen)
+ {
+     qreal factor = qreal(1.0);
+--- a/src/gui/kernel/qwindow_p.h
++++ b/src/gui/kernel/qwindow_p.h
+@@ -142,7 +142,7 @@
+     void connectToScreen(QScreen *topLevelScreen);
+     void disconnectFromScreen();
+     void emitScreenChangedRecursion(QScreen *newScreen);
+-    QScreen *screenForGeometry(const QRect &rect);
++    QScreen *screenForGeometry(const QRect &rect) const;
+ 
+     virtual void clearFocusObject();
+     virtual QRectF closestAcceptableGeometry(const QRectF &rect) const;
+
+--- a/src/gui/kernel/qwindow.cpp
++++ b/src/gui/kernel/qwindow.cpp
+@@ -1605,9 +1605,9 @@
+   chicken and egg problem here: we cannot convert to native coordinates
+   before we know which screen we are on.
+ */
+-QScreen *QWindowPrivate::screenForGeometry(const QRect &newGeometry)
++QScreen *QWindowPrivate::screenForGeometry(const QRect &newGeometry) const
+ {
+-    Q_Q(QWindow);
++    Q_Q(const QWindow);
+     QScreen *currentScreen = q->screen();
+     QScreen *fallback = currentScreen;
+     QPoint center = newGeometry.center();
+@@ -2488,6 +2488,10 @@
+         && (d->platformWindow->isForeignWindow() || d->platformWindow->isEmbedded())) {
+         return QHighDpi::fromNativeLocalPosition(d->platformWindow->mapToGlobal(QHighDpi::toNativeLocalPosition(pos, this)), this);
+     }
++    
++    if (QHighDpiScaling::isActive())
++        return QHighDpiScaling::mapPositionToGlobal(pos, d->globalPosition(), this);
++     
+     return pos + d->globalPosition();
+ }
+ 
+@@ -2508,6 +2512,10 @@
+         && (d->platformWindow->isForeignWindow() || d->platformWindow->isEmbedded())) {
+         return QHighDpi::fromNativeLocalPosition(d->platformWindow->mapFromGlobal(QHighDpi::toNativeLocalPosition(pos, this)), this);
+     }
++    
++    if (QHighDpiScaling::isActive())
++        return QHighDpiScaling::mapPositionFromGlobal(pos, d->globalPosition(), this);
++        
+     return pos - d->globalPosition();
+ }
+ 
