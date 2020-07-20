@@ -1,3 +1,52 @@
+--- a/src/gui/kernel/qguiapplication.h
++++ b/src/gui/kernel/qguiapplication.h
+@@ -110,6 +110,8 @@
+ 
+     static QScreen *primaryScreen();
+     static QList<QScreen *> screens();
++    static QScreen *screenAt(const QPoint &point);
++    
+     qreal devicePixelRatio() const;
+ 
+ #ifndef QT_NO_CURSOR
+ 
+--- a/src/gui/kernel/qguiapplication.cpp
++++ b/src/gui/kernel/qguiapplication.cpp
+@@ -981,6 +981,34 @@
+ }
+ 
+ /*!
++    Returns the screen at \a point, or \nullptr if outside of any screen.
++    The \a point is in relation to the virtualGeometry() of each set of virtual
++    siblings. If the point maps to more than one set of virtual siblings the first
++    match is returned.  If you wish to search only the virtual desktop siblings
++    of a known screen (for example siblings of the screen of your application
++    window \c QWidget::windowHandle()->screen()), use QScreen::virtualSiblingAt().
++    \since 5.10
++*/
++QScreen *QGuiApplication::screenAt(const QPoint &point)
++{
++    QVarLengthArray<const QScreen *, 8> visitedScreens;
++    for (const QScreen *screen : QGuiApplication::screens()) {
++        if (visitedScreens.contains(screen))
++            continue;
++
++        // The virtual siblings include the screen itself, so iterate directly
++        for (QScreen *sibling : screen->virtualSiblings()) {
++            if (sibling->geometry().contains(point))
++                return sibling;
++
++            visitedScreens.append(sibling);
++        }
++    }
++
++    return nullptr;
++}
++
++/*!
+     \fn void QGuiApplication::screenAdded(QScreen *screen)
+ 
+     This signal is emitted whenever a new screen \a screen has been added to the system.
 --- a/src/gui/kernel/qhighdpiscaling_p.h
 +++ b/src/gui/kernel/qhighdpiscaling_p.h
 @@ -83,8 +83,10 @@
